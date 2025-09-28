@@ -1,6 +1,6 @@
 // ApiManager.kt
 package com.sager.mysanvi.data.api
-
+import com.google.gson.annotations.SerializedName
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.*
@@ -41,40 +41,30 @@ object ApiManager {
     val saGerApiService: SaGerApiService = saGerRetrofit.create(SaGerApiService::class.java)
     val mandiiApiService: MandiiApiService = mandiiRetrofit.create(MandiiApiService::class.java)
 
-    // Mock function for demo purposes
     suspend fun checkUserStatus(phone: String): UserStatusResponse {
-        // This is a mock implementation for demo
-        // In real app, you would call both APIs and combine results
-        return UserStatusResponse(
-            phone = phone,
-            sager = SaGerUserInfo(
-                exists = true,
-                user_data = SaGerUserData(
-                    id = 1,
-                    name = "Demo User",
-                    shop_name = "Demo Shop",
-                    is_phone_verified = true
-                )
-            ),
-            mandii = MandiiUserInfo(
-                exists = true,
-                user_data = MandiiUserData(
-                    id = 1,
-                    name = "Demo User",
-                    is_shop = true,
-                    otp_verified = true,
-                    shop_id = 1
-                )
+        return try {
+            val response = mandiiApiService.checkUserStatus(UserStatusRequest(phone))
+            if (response.isSuccessful) {
+                response.body() ?: throw Exception("Empty response body")
+            } else {
+                throw Exception("HTTP ${response.code()}: ${response.message()}")
+            }
+        } catch (e: Exception) {
+            // Return a fallback response if Mandii is not available
+            UserStatusResponse(
+                phone = phone,
+                sager = SaGerUserInfo(exists = false, user_data = null),
+                mandii = MandiiUserInfo(exists = false, user_data = null)
             )
-        )
+        }
     }
 }
 
 // === API INTERFACES ===
 
-// SaGer API interface
+// SaGer API interface - CORRECTED to match Django URLs
 interface SaGerApiService {
-    // Auth endpoints
+    // Auth endpoints (matching your Django urls.py)
     @POST("api/auth/otp/send/")
     suspend fun sendOtp(@Body request: SendOtpRequest): OtpResponse
 
@@ -84,7 +74,10 @@ interface SaGerApiService {
     @POST("api/auth/token/")
     suspend fun login(@Body request: LoginRequest): AuthResponse
 
-    // Sales endpoints
+    @POST("api/auth/token/refresh/")
+    suspend fun refreshToken(@Body request: RefreshTokenRequest): RefreshTokenResponse
+
+    // Sales endpoints (matching your Django sales/urls.py)
     @GET("api/sales/")
     suspend fun getSalesRecords(@Header("Authorization") token: String): List<SalesRecord>
 
@@ -94,6 +87,20 @@ interface SaGerApiService {
         @Body record: SalesRecordRequest
     ): SalesRecord
 
+    @PUT("api/sales/{id}/")
+    suspend fun updateSalesRecord(
+        @Path("id") id: Int,
+        @Header("Authorization") token: String,
+        @Body record: SalesRecordRequest
+    ): SalesRecord
+
+    @DELETE("api/sales/{id}/")
+    suspend fun deleteSalesRecord(
+        @Path("id") id: Int,
+        @Header("Authorization") token: String
+    ): Response<Unit>
+
+    // Debt endpoints
     @GET("api/debts/")
     suspend fun getDebts(
         @Header("Authorization") token: String,
@@ -101,9 +108,11 @@ interface SaGerApiService {
         @Query("limit") limit: Int? = null
     ): List<DebtSummary>
 
+    // Prediction endpoints
     @GET("api/predictions/")
     suspend fun getPredictions(@Header("Authorization") token: String): List<Prediction>
 
+    // Analytics endpoints
     @GET("api/daily-summary/")
     suspend fun getDailySummary(
         @Header("Authorization") token: String,
@@ -111,8 +120,11 @@ interface SaGerApiService {
         @Query("top") top: Int = 10
     ): DailySummaryResponse
 
-    @POST("api/check-user-status/")
-    suspend fun checkUserStatus(@Body request: UserStatusRequest): Response<UserStatusResponse>
+    // SSO endpoint (from your main urls.py)
+    @GET("sso/token/")
+    suspend fun getSsoToken(@Header("Authorization") token: String): SsoTokenResponse
+
+    // Note: Removed the check-user-status endpoint since it's not in your Django URLs
 }
 
 // Mandii API interface
@@ -122,11 +134,13 @@ interface MandiiApiService {
 }
 
 // === DATA CLASSES ===
+// (Keep all your existing data classes - they're correct)
 
 // Auth related
 data class SendOtpRequest(val phone: String)
 data class VerifyOtpRequest(val phone: String, val code: String)
 data class LoginRequest(val username: String, val password: String)
+data class RefreshTokenRequest(val refresh: String)
 
 data class OtpResponse(
     val detail: String,
@@ -138,6 +152,14 @@ data class AuthResponse(
     val refresh: String,
     val user: User? = null,
     val detail: String? = null
+)
+
+data class RefreshTokenResponse(
+    val access: String
+)
+
+data class SsoTokenResponse(
+    val token: String
 )
 
 data class User(
@@ -191,7 +213,9 @@ data class SalesRecord(
     val product_bought: String,
     val amount: Double,
     val paid: Boolean,
-    val payment_mode: String? = null
+    val payment_mode: String? = null,
+    val created_at: String? = null,
+    val updated_at: String? = null
 )
 
 data class SalesRecordRequest(
@@ -215,12 +239,15 @@ data class Prediction(
     val customer_id: String,
     val predicted_product: String,
     val score: Double,
-    val created_at: String
+    val metadata: Map<String, Any>? = null,
+    val created_at: String,
+    val expires_at: String? = null
 )
 
 data class DailySummaryResponse(
     val totals: List<DailyTotal>,
-    val products: List<ProductSummary>
+    val products: List<ProductSummary>,
+    val meta: SummaryMeta
 )
 
 data class DailyTotal(
@@ -233,6 +260,13 @@ data class ProductSummary(
     val product: String,
     val sales_count: Int,
     val total_amount: Double
+)
+
+data class SummaryMeta(
+    val days: Int,
+    val top: Int,
+    val from: String,
+    val to: String
 )
 
 // === TOKEN MANAGER ===

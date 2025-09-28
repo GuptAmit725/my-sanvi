@@ -12,9 +12,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 import com.sager.mysanvi.data.api.ApiManager
 import com.sager.mysanvi.data.api.UserStatusResponse
+import com.sager.mysanvi.data.api.SendOtpRequest
+import com.sager.mysanvi.data.api.VerifyOtpRequest
+import com.sager.mysanvi.data.api.TokenManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -26,6 +28,7 @@ fun LoginScreen(
     var currentStep by remember { mutableStateOf(LoginStep.PHONE_INPUT) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var successMessage by remember { mutableStateOf<String?>(null) }
 
     val scope = rememberCoroutineScope()
 
@@ -59,17 +62,27 @@ fun LoginScreen(
             LoginStep.PHONE_INPUT -> {
                 PhoneInputStep(
                     phone = phone,
-                    onPhoneChange = { phone = it; errorMessage = null },
+                    onPhoneChange = { phone = it; errorMessage = null; successMessage = null },
                     onSendOtp = {
                         if (phone.isNotBlank()) {
                             isLoading = true
                             scope.launch {
                                 try {
-                                    delay(1000) // Simulate API call delay
+                                    // Call real API
+                                    val response = ApiManager.saGerApiService.sendOtp(
+                                        SendOtpRequest(phone.trim())
+                                    )
+                                    successMessage = response.detail
                                     errorMessage = null
                                     currentStep = LoginStep.OTP_VERIFICATION
+
+                                    // In debug mode, show OTP if available
+                                    response.otp?.let { debugOtp ->
+                                        successMessage += " (Debug OTP: $debugOtp)"
+                                    }
                                 } catch (e: Exception) {
-                                    errorMessage = "Failed to send OTP"
+                                    errorMessage = "Failed to send OTP: ${e.message}"
+                                    successMessage = null
                                 } finally {
                                     isLoading = false
                                 }
@@ -79,29 +92,50 @@ fun LoginScreen(
                         }
                     },
                     isLoading = isLoading,
-                    error = errorMessage
+                    error = errorMessage,
+                    success = successMessage
                 )
             }
             LoginStep.OTP_VERIFICATION -> {
                 OtpVerificationStep(
                     phone = phone,
                     otp = otp,
-                    onOtpChange = { otp = it; errorMessage = null },
+                    onOtpChange = { otp = it; errorMessage = null; successMessage = null },
                     onVerifyOtp = {
                         if (otp.isNotBlank()) {
                             isLoading = true
                             scope.launch {
                                 try {
-                                    delay(1000) // Simulate network delay
-                                    if (otp.length == 6) {
-                                        // Check user status using mock API
-                                        val userStatus = ApiManager.checkUserStatus(phone)
-                                        onLoginSuccess(userStatus)
-                                    } else {
-                                        errorMessage = "Please enter a 6-digit OTP"
-                                    }
+                                    // Call real verification API
+                                    val response = ApiManager.saGerApiService.verifyOtp(
+                                        VerifyOtpRequest(phone.trim(), otp.trim())
+                                    )
+
+                                    // Save tokens
+                                    TokenManager.saveTokens(response.access, response.refresh)
+
+                                    // Create user status response
+                                    val userStatus = UserStatusResponse(
+                                        phone = phone,
+                                        sager = com.sager.mysanvi.data.api.SaGerUserInfo(
+                                            exists = true,
+                                            user_data = com.sager.mysanvi.data.api.SaGerUserData(
+                                                id = response.user?.id,
+                                                name = response.user?.name,
+                                                shop_name = response.user?.shop_name,
+                                                is_phone_verified = response.user?.is_phone_verified ?: true
+                                            )
+                                        ),
+                                        mandii = com.sager.mysanvi.data.api.MandiiUserInfo(
+                                            exists = false, // Will be checked later
+                                            user_data = null
+                                        )
+                                    )
+
+                                    onLoginSuccess(userStatus)
                                 } catch (e: Exception) {
                                     errorMessage = "Verification failed: ${e.message}"
+                                    successMessage = null
                                 } finally {
                                     isLoading = false
                                 }
@@ -113,10 +147,21 @@ fun LoginScreen(
                     onResendOtp = {
                         scope.launch {
                             try {
-                                delay(500)
-                                errorMessage = "OTP resent! (Demo: use any 6-digit code)"
+                                isLoading = true
+                                val response = ApiManager.saGerApiService.sendOtp(
+                                    SendOtpRequest(phone.trim())
+                                )
+                                successMessage = "OTP resent: ${response.detail}"
+                                errorMessage = null
+
+                                response.otp?.let { debugOtp ->
+                                    successMessage += " (Debug OTP: $debugOtp)"
+                                }
                             } catch (e: Exception) {
-                                errorMessage = "Failed to resend OTP"
+                                errorMessage = "Failed to resend OTP: ${e.message}"
+                                successMessage = null
+                            } finally {
+                                isLoading = false
                             }
                         }
                     },
@@ -124,9 +169,11 @@ fun LoginScreen(
                         currentStep = LoginStep.PHONE_INPUT
                         otp = ""
                         errorMessage = null
+                        successMessage = null
                     },
                     isLoading = isLoading,
-                    error = errorMessage
+                    error = errorMessage,
+                    success = successMessage
                 )
             }
         }
@@ -139,7 +186,8 @@ private fun PhoneInputStep(
     onPhoneChange: (String) -> Unit,
     onSendOtp: () -> Unit,
     isLoading: Boolean,
-    error: String?
+    error: String?,
+    success: String?
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally
@@ -164,11 +212,34 @@ private fun PhoneInputStep(
 
         if (error != null) {
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = error,
-                color = MaterialTheme.colorScheme.error,
-                fontSize = 14.sp
-            )
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Text(
+                    text = error,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
+
+        if (success != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Text(
+                    text = success,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -199,7 +270,8 @@ private fun OtpVerificationStep(
     onResendOtp: () -> Unit,
     onChangePhone: () -> Unit,
     isLoading: Boolean,
-    error: String?
+    error: String?,
+    success: String?
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally
@@ -233,11 +305,34 @@ private fun OtpVerificationStep(
 
         if (error != null) {
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = error,
-                color = MaterialTheme.colorScheme.error,
-                fontSize = 14.sp
-            )
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Text(
+                    text = error,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
+
+        if (success != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Text(
+                    text = success,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
